@@ -3,73 +3,89 @@ from os import stat, path
 from binascii import crc32
 from threading import Thread
 from time import sleep
+from struct import pack, unpack
 import socket
 
 KA = False
+ADDRESS = ("127.0.0.1", 123)
+PORT = 123
 
-def KA_thread(sender, adress):
+def KA_thread(s:socket.socket):
     while True:
         if not KA:
             return
 
-        sender.sendto(str.encode('7'), adress)
+        s.sendto(str.encode('7'), ADDRESS)
         try:
-            sender.settimeout(10)
-            response = str(sender.recv(1500).decode())
+            s.settimeout(10)
+            response = str(s.recv(1500).decode())
 
             if response != '7':
                 print("Keep alive - wrong response")
         except socket.timeout:
             if KA :
                 print("Keep alive - no response")
-                sender.close()
+                s.close()
             return
     
         for i in range(10):
             if KA:
                 sleep(1)
 
-def start_KA(vysielac, adresa, interval):
+def start_KA(s:socket.socket, interval):
     global KA
-    thread = Thread(target=KA_thread, args=(vysielac, adresa, interval))
+    thread = Thread(target=KA_thread, args=[s])
     thread.daemon = True
     thread.start()
     KA = True
     return thread
 
-def send_fragment(message, fragment_number, fragment_size):
+def send_fragment(s:socket.socket, message, fragment_number:int, fragment_size:int, message_type):
     # Rozdelenie správy na fragmenty
     data = message[fragment_number*fragment_size:(fragment_number+1)*fragment_size]
-    
-    # Struct pack alternative
-    # payload =
 
+    # Struct pack podla typu správy
+    if message_type == "1":
+        payload = pack("cHH", str.encode('3'), fragment_size, fragment_number) + (data.encode())
+    elif message_type == "2":
+        payload = pack("cHH", str.encode('4'), fragment_size, fragment_number) + (data)
+    
     # Vypočítanie CRC pomocou binascii
     crc = crc32(payload)
-    # payload += crc
+    # Pridanie vypočítaného CRC na koniec payloadu
+    payload += pack("I", crc)
+
+    # Odoslanie fragmentu
     print("Sending fragment number "+ str(fragment_number) + ", with fragment size " + str(len(data)) + "B")
-    s.sendto(payload, (ip_adress, int(port)))
+    s.sendto(payload, ADDRESS)
 
-
-def sender(ip_adress, port):
+def sender():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.sendto(str.encode('1'), (ip_adress, int(port)))
-        response = str(sender.recv(1500).decode())
+        global ADDRESS
+        s.sendto(str.encode('1'), ADDRESS)
+        response = str(s.recv(1500).decode())
         if response != '1':
             print("Didn't recieve initial response")
             s.close()
             return
 
-        thread = Thread(target=KA_thread, args=(s, (ip_adress, int(port))))
+        thread = Thread(target=KA_thread, args=[s])
         thread.daemon = True
         thread.start()
         global KA
         KA = True
 
         while True:
-            i = input("[1] Send a text message\n[2] Send a file\n[0] Exit\n")
+            i = input("[1] Send a text message\n[2] Send a file\n[3] Switch roles\n[0] Exit\n")
             if i == '0':
                 break
+            if i == '3':
+                s.sendto(str.encode('8'), ADDRESS)
+                response, address = s.recvfrom(1500)
+                if str(response.decode()) != '8':
+                    print("Switching roles - wrong response, can't switch roles")
+                ADDRESS = address
+                return reciever()
             elif i == '1':
                 message = input("Enter a message : ")
             elif i == '2':
@@ -86,16 +102,16 @@ def sender(ip_adress, port):
             if i == '2':
                 file_size = stat(file_path).st_size
                 number_of_fragments = ceil(file_size / fragment_size)
-                with open(file_path,'r') as f:
+                with open(file_path,'rb') as f:
                     message = f.read()
                 # Typ správy - 4 - odosielanie súboru
                 msg_init = '4' + str(number_of_fragments)
 
             # Odoslanie inicializačnej správy
-            s.sendto(str.encode(msg_init), (ip_adress, int(port)))
+            s.sendto(str.encode(msg_init), ADDRESS)
 
             for fragment_number in range(number_of_fragments):
-                send_fragment(message, fragment_number, fragment_size)
+                send_fragment(s, message, fragment_number, fragment_size, i)
 
             try :
                 response = str(s.recv(1500).decode())
@@ -104,7 +120,7 @@ def sender(ip_adress, port):
                     failed_fragments = response[1:].split(",")
                     for f in failed_fragments:
                         print("Sending failed framgents :")
-                        send_fragment(message, f, fragment_size)
+                        send_fragment(s, message, f, fragment_size, i)
             
                 if response[:1] == '5':
                     print("Successful transfer")
@@ -113,67 +129,85 @@ def sender(ip_adress, port):
                 continue
 
 
-def reciever(port):
+def reciever():
     messages = []
     failed_fragments  = ''
     recieved_message = ''
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as r:
-        r.bind(("127.0.0.1", int(port)))
-        response, address = s.recvfrom(1500)
-        r.sendto(str.encode("1"), response[1])
-        print("Connection successful (" + str(response[1]) + ")")
+        r.bind(("", PORT))
+        response, address = r.recvfrom(1500)
+        global ADDRESS
+        ADDRESS = address
+        r.sendto(str.encode("1"), ADDRESS)
+        print("Connection successful (" + str(ADDRESS) + ")")
         while True:
             try:
                 # Keep alive casovac
                 r.settimeout(20)
-                response = str(s.recv(1500).decode())        
+                initial = str(r.recv(1500).decode())        
 
                 # Keep alive odpoved
-                if response[:1] == '7' and KA:                   
-                    r.sendto(str.encode('7'), address)
-                    print("KEEP ALIVE - posielam odpoveď")
+                if initial[:1] == '7' and KA:                   
+                    r.sendto(str.encode('7'), ADDRESS)
+                    print("KEEP ALIVE - response")
+                if initial[:1] == '8':
+                    r.sendto(str.encode('8'), ADDRESS)
+                    print("Switching roles")
+                    return sender()                  
 
-                if response[:1] == '3' or response[:1] == '4':
-                    number_of_fragments = response[1:]
+                if initial[:1] == '3' or initial[:1] == '4':
+                    number_of_fragments = initial[1:]
                     print("Recieving " + number_of_fragments + " fragments :")
 
                     # Prijímanie správy :
-                    del messages, failed_fragments, recieved_message
-                    for i in range(number_of_fragments):
-                        data = r.recv(65498)
-                        # Unpack alternative
-                    
+                    messages = [""] * int(number_of_fragments)
+                    failed_fragments = ""
+                    recieved_message = ""
+                    for i in range(int(number_of_fragments)):
+                        message = r.recv(65498)
+                        # Struct unpack prijatej spravy
+                        payload = unpack("cHH", message[:6])    # [:6] pretože nás zaujíma prvých 5 byte-ov hlavičky
+                        recieved_crc = unpack("I", message[-4:])[0]     # [-4:] pretože CRC sú posledné 4 byte hlavičky
+                        data = message[6:-4]    # [6:-4] zostávajúce byte sú práve prenášané dáta 
+                        fragment_size = payload[1]    # 1. blok v hlavičke
+                        fragment_number = payload[2]    # 2. blok v hlavičke
+                        # Správu naspäť "poskladám" a vypočítam z nej CRC
+                        packed_payload = pack("cHH", payload[0], payload[1], payload[2]) + data
+                        calculated_crc = crc32(packed_payload)
 
                         if calculated_crc == recieved_crc:
                             print("Recieved fragment number "+ str(fragment_number), ", with fragment size ", str(fragment_size), "B")
-                            if response[:1] == '3':
-                                messages[fragment_number] = message.decode()
+                            if initial[:1] == '3':
+                                messages[fragment_number] = data.decode()
                             else:
-                                messages[fragment_number] = message
+                                messages[fragment_number] = data
                         else:
+                            # Ak sa CRC nerovnajú, zapíšem nesprávny paket
                             print("Recieved wrong packet - ", fragment_number)
                             failed_fragments += str(fragment_number) + ","
 
+                    # Pokial je zoznam nesprávnych paketov prázdny, odošlem odpoveď o úspešnej komunikácií
                     if not failed_fragments:
                         for m in messages:
                             recieved_message += m
-                        if response[:1] == '3':                           
+                        if initial[:1] == '3':                           
                             print("Recieved message :\n", recieved_message)
-                        elif response[:1] == '4':                                    
+                        elif initial[:1] == '4':                                    
                             file_path = path.dirname(path.realpath(__file__)) + "\\recieved_file.txt"
-                            with open(file_path,'w') as f:
+                            with open(file_path,'wb') as f:
                                 f.write(recieved_message)
                                 f.close()
                             print("Recieved file :\n", file_path)  
-                        r.sendto(str.encode("5"), address)
+                        r.sendto(str.encode("5"), ADDRESS)
                         return
                     else:
-                        # Prerobit struct pack
-                        r.sendto(struct.pack("c", str.encode("6")) + chybne_spravy[:-1].encode(), adresa)
+                        failed_fragments = failed_fragments[:-1]    # Odstránenie poslednej "trailing" čiarky
+                        # Odoslanie odpovede o neúspešnej komunikácií
+                        r.sendto(pack("B", str.encode("6")) + failed_fragments.encode(), ADDRESS)
 
             except socket.timeout:
-                print("KEEP ALIVE - vypršal čas, spojenie bolo zrušené")
+                print("KEEP ALIVE - timeout - socket closed")
                 r.close()
                 return
 
@@ -184,8 +218,9 @@ while True:
     elif i == '1':
         # ip = input("IP adress: ")
         # port = input("Port: ")
-        # sender(ip, port)
-        sender('127.0.0.1', '123')
+        # ADDRESS = (ip, port)
+        # sender()
+        sender()
     elif i == '2':
-        port = input("Port: ")
-        reciever(port)
+        PORT = int(input("Port: "))
+        reciever()

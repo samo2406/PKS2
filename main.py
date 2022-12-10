@@ -7,126 +7,162 @@ from struct import pack, unpack
 import socket
 
 KA = False
-ADDRESS = ("127.0.0.1", 123)
-PORT = 123
+PORT = 123 
 
-def KA_thread(s:socket.socket):
-    while True:
-        if not KA:
-            return
+class KA():
+    def __init__(self, socket:socket.socket):
+        self.thread = Thread(target=self.KA_thread, args=[socket])
+        self.thread.daemon = True
+        self.thread.start()
+        self.active = True
+        self.socket = socket
 
-        s.sendto(str.encode('7'), ADDRESS)
-        try:
-            s.settimeout(10)
-            response = str(s.recv(1500).decode())
-
-            if response != '7':
-                print("Keep alive - wrong response")
-        except socket.timeout:
-            if KA :
-                print("Keep alive - no response")
-                s.close()
-            return
-    
-        for i in range(10):
-            if KA:
-                sleep(1)
-
-def start_KA(s:socket.socket, interval):
-    global KA
-    thread = Thread(target=KA_thread, args=[s])
-    thread.daemon = True
-    thread.start()
-    KA = True
-    return thread
-
-def send_fragment(s:socket.socket, message, fragment_number:int, fragment_size:int, message_type):
-    # Rozdelenie správy na fragmenty
-    data = message[fragment_number*fragment_size:(fragment_number+1)*fragment_size]
-
-    # Struct pack podla typu správy
-    if message_type == "1":
-        payload = pack("cHH", str.encode('3'), fragment_size, fragment_number) + (data.encode())
-    elif message_type == "2":
-        payload = pack("cHH", str.encode('4'), fragment_size, fragment_number) + (data)
-    
-    # Vypočítanie CRC pomocou binascii
-    crc = crc32(payload)
-    # Pridanie vypočítaného CRC na koniec payloadu
-    payload += pack("I", crc)
-
-    # Odoslanie fragmentu
-    print("Sending fragment number "+ str(fragment_number) + ", with fragment size " + str(len(data)) + "B")
-    s.sendto(payload, ADDRESS)
-
-def sender():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        global ADDRESS
-        s.sendto(str.encode('1'), ADDRESS)
-        response = str(s.recv(1500).decode())
-        if response != '1':
-            print("Didn't recieve initial response")
-            s.close()
-            return
-
-        thread = Thread(target=KA_thread, args=[s])
-        thread.daemon = True
-        thread.start()
-        global KA
-        KA = True
-
+    def KA_thread(self):
         while True:
-            i = input("[1] Send a text message\n[2] Send a file\n[3] Switch roles\n[0] Exit\n")
-            if i == '0':
-                break
-            if i == '3':
-                s.sendto(str.encode('8'), ADDRESS)
-                response, address = s.recvfrom(1500)
-                if str(response.decode()) != '8':
-                    print("Switching roles - wrong response, can't switch roles")
-                ADDRESS = address
-                return reciever()
-            elif i == '1':
-                message = input("Enter a message : ")
-            elif i == '2':
-                file_path = input("Enter file name : ")
-            fragment_size = int(input("Fragment size : "))
-            if fragment_size <= 0 or fragment_size >= 65498:
-                print("Invalid frament size, using 1500")
-                fragment_size = 1500
-            
-            if i == '1':
-                number_of_fragments = ceil(len(message) / fragment_size)
-                # Typ správy - 3 - odosielanie textovej správy
-                msg_init = '3' + str(number_of_fragments)
-            if i == '2':
-                file_size = stat(file_path).st_size
-                number_of_fragments = ceil(file_size / fragment_size)
-                with open(file_path,'rb') as f:
-                    message = f.read()
-                # Typ správy - 4 - odosielanie súboru
-                msg_init = '4' + str(number_of_fragments)
+            if not self.active:
+                return
 
-            # Odoslanie inicializačnej správy
-            s.sendto(str.encode(msg_init), ADDRESS)
+            self.socket.sendto(str.encode('7'), ADDRESS)
+            try:
+                self.socket.settimeout(10)
+                response = str(self.socket.recv(1500).decode())
 
-            for fragment_number in range(number_of_fragments):
-                send_fragment(s, message, fragment_number, fragment_size, i)
-
-            try :
-                response = str(s.recv(1500).decode())
-                    
-                if response[:1] == '6':
-                    failed_fragments = response[1:].split(",")
-                    for f in failed_fragments:
-                        print("Sending failed framgents :")
-                        send_fragment(s, message, f, fragment_size, i)
-            
-                if response[:1] == '5':
-                    print("Successful transfer")
+                if response != '7':
+                    print("Keep alive - wrong response")
             except socket.timeout:
-                print("Didn't recieve file transfer response")
-                continue
+                if KA :
+                    print("Keep alive - no response")
+                    self.socket.close()
+                return
+        
+            for _ in range(5):
+                if self.active:
+                    sleep(1)
+
+class Sender():
+    def __init__(self, address):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.address = address
+        
+        # Odošleme správu na inicializáciu komunikácie
+        self.socket.sendto(str.encode('1'), address)
+        
+        # Čakáme na inicializačnú odpoveď
+        self.opened = self.recieve_init()
+        if self.opened:
+            # Ak dostaneme inicializačnú odpoveď, spustíme keep alive thread
+            self.keep_alive = KA(self.socket)
+        else:
+            # Ak nedostaneme inicializačnú odpoveď zavrieme socket
+            self.socket.close()
+        
+    def is_open(self) -> bool:
+        return self.opened
+
+    def send_file(self, file_path:str, fragment_size:int=1500) -> bool: 
+        # Typ správy - 4 - odosielanie súboru
+        self.message_type = '4'    
+        file_size = stat(file_path).st_size
+        self.fragment_size = fragment_size
+        self.number_of_fragments = ceil(file_size / fragment_size)
+
+        with open(file_path,'rb') as f:
+            self.message = f.read()
+        
+        return self.send_init()
+
+    def send_text(self, message:str, fragment_size:int=1500) -> bool:
+        # Typ správy - 3 - odosielanie textovej správy  
+        self.message_type = '3'
+        self.message = message
+        self.fragment_size = fragment_size                   
+        self.number_of_fragments = ceil(len(message) / fragment_size)
+      
+        return self.send_init()
+       
+    def send_init(self) -> bool:
+        # Odoslanie inicializačnej správy
+        init_message = self.message_type + str(self.number_of_fragments)
+        self.socket.sendto(str.encode(init_message), self.address)
+
+        # Odosielanie fragmentov
+        for fragment_number in range(self.number_of_fragments):
+            self.send_fragment(fragment_number)
+
+        return self.recieve_ack()
+
+    def send_fragment(self, fragment_number:int):
+        # Rozdelenie správy na fragmenty
+        data = self.message[fragment_number*self.fragment_size:(fragment_number+1)*self.fragment_size]
+
+        # Struct pack podla typu správy
+        payload = pack('cHH', str.encode(self.message_type), self.fragment_size, fragment_number)
+        if self.message_type == '3':
+            payload += data.encode()
+        elif self.message_type == '4':
+            payload += data
+        
+        # Vypočítanie CRC pomocou binascii
+        crc = crc32(payload)
+        # Pridanie vypočítaného CRC na koniec payloadu
+        payload += pack('I', crc)
+
+        # Odoslanie fragmentu
+        print('Sending fragment No. '+ str(fragment_number) + ' [' + str(len(data)) + 'B]')
+        self.socket.sendto(payload, self.address)
+
+    def recieve_ack(self) -> bool:
+        try :
+            self.socket.settimeout(5)
+            response = str(self.socket.recv(1500).decode())
+                    
+            if response[:1] == '6':
+                failed_fragments = response[1:].split(',')
+                for f in failed_fragments:
+                    print('Sending failed fragments :')
+                    self.send_fragment(int(f))
+                return self.recieve_ack()
+        
+            if response[:1] == '5':
+                return True
+        except socket.timeout:
+            return False
+
+    def recieve_init(self) -> bool:
+        try :
+            self.socket.settimeout(5)
+            response = str(self.socket.recv(1500).decode())
+                  
+            if response == '1':
+                return True
+            else:
+                return False
+
+        except socket.timeout:
+            return False
+
+class Reciever():
+    def __init__(self, port:int):
+        self.port = port
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("", self.port))
+
+        self.initialized = self.recieve_init()
+
+    def is_initialized(self) -> bool:
+        return self.initialized
+
+    def recieve_init(self) -> bool:
+        try :
+            self.socket.settimeout(60)
+            message, address = self.socket.recvfrom(1500)
+            if message.decode() == "1":
+                self.address = address
+                return True
+            else:
+                return False
+        except socket.timeout:
+            return False
 
 
 def reciever():
@@ -217,10 +253,13 @@ while True:
         break
     elif i == '1':
         # ip = input("IP adress: ")
-        # port = input("Port: ")
-        # ADDRESS = (ip, port)
-        # sender()
-        sender()
+        # port = int(input("Port: "))
+        # address = (ip, port)
+        # sender = Sender(address)
+        sender:Sender = Sender(("127.0.0.1", 123))
+        if not sender.is_open():
+            print("Didn't recieve initial response")
+
     elif i == '2':
         PORT = int(input("Port: "))
         reciever()

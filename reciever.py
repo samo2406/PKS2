@@ -41,7 +41,7 @@ class Reciever():
                     # KEEP ALIVE odpoveď
                     self.socket.sendto(str.encode('7'), self.address)
 
-                elif message_type == '':
+                elif message_type == '2':
                     # Výmena rolí
                     port = self.address[1]
                     self.socket.sendto(str.encode('2'+str(port)), self.address)

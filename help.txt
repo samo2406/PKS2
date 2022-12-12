@@ -1,0 +1,7 @@
+Spustit program
+/usr/bin/python3 /Users/samuel/Desktop/Skola/ZS-22/PKS/PKS2/main.py
+
+2MB subor
+/Users/samuel/Desktop/Skola/ZS-22/PKS/PKS2/sample.txt
+
+

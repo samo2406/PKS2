@@ -1,7 +1,5 @@
 from sender import Sender
 from reciever import Reciever
-from binascii import crc32
-from struct import pack
 
 def main_menu():
     return input("[1] Sender\n[2] Reciever\n[0] Exit\n")
@@ -20,7 +18,6 @@ def reciever_init():
     return Reciever(port)
 
 while True:
-    print(crc32(pack("c",str.encode("1"))))
     sender = None
     reciever = None
     
